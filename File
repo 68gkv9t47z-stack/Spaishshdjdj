@@ -1,0 +1,84 @@
+-- ====================================================================
+-- Yousef Hub v3: اختيار خبير + قراءة الكود المطلوب ومطابقته
+-- ====================================================================
+
+local ALLOWED_USER = "PDKAR1"
+
+local Players = game:GetService("Players")
+local LocalPlayer = Players.LocalPlayer
+
+-- التحقق من اسم المستخدم فوراً وتأمين السكربت
+if LocalPlayer.Name ~= ALLOWED_USER then
+    LocalPlayer:Kick("⛔ هذا السكربت غير مصرح لك باستهدافه أو استخدامه.")
+    return
+end
+
+local GuiService = game:GetService("GuiService")
+local VIM = game:GetService("VirtualInputManager")
+local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+
+-- ====================================================================
+-- نسخة محدودة المدة: يتوقف السكربت كله بعد SESSION_HOURS ساعات من التشغيل
+-- ====================================================================
+local SESSION_HOURS = 1
+
+local env = (getgenv and getgenv()) or _G
+if env.__YH_STOP then pcall(env.__YH_STOP) end -- نوقف النسخة السابقة إذا انشغّل مرتين
+local alive = true
+local startTime = os.time()
+local SESSION_SECONDS = SESSION_HOURS * 3600
+
+-- ====================================================================
+-- Anti-AFK: يمنع الطرد بعد 20 دقيقة بدون حركة
+-- ====================================================================
+local VirtualUser = game:GetService("VirtualUser")
+
+local idledConn = LocalPlayer.Idled:Connect(function()
+    pcall(function()
+        VirtualUser:CaptureController()
+        VirtualUser:ClickButton2(Vector2.new(0, 0))
+    end)
+end)
+
+-- احتياط: حركة ماوس صغيرة كل دقيقة (بعض المشغّلات ما يطلق Idled)
+task.spawn(function()
+    while alive do
+        task.wait(60)
+        if not alive then break end
+        pcall(function()
+            VirtualUser:CaptureController()
+            VirtualUser:ClickButton2(Vector2.new(0, 0))
+        end)
+    end
+end)
+
+-- إعدادات
+local USE_TOUCH = false       -- خلها true إذا الضغط الفعلي ما يشتغل على جوالك
+local ALWAYS_PHYSICAL = false -- true = يضغط ضغطة فعلية حتى لو لقى زر
+
+-- ====================================================================
+-- 1. الواجهة
+-- ====================================================================
+local sg = Instance.new("ScreenGui")
+sg.Name = "YousefHub_ExpertHack"
+sg.ResetOnSpawn = false
+
+pcall(function() sg.Parent = game:GetService("CoreGui") end)
+if not sg.Parent or not sg:IsDescendantOf(game) then sg.Parent = PlayerGui end
+
+local main = Instance.new("Frame", sg)
+main.Size = UDim2.new(0, 230, 0, 240)
+main.Position = UDim2.new(0, 5, 0.3, 0)
+main.BackgroundColor3 = Color3.fromRGB(20, 15, 28)
+main.Active = true
+main.Draggable = true
+Instance.new("UICorner", main).CornerRadius = UDim.new(0, 10)
+
+local stroke = Instance.new("UIStroke", main)
+stroke.Color = Color3.fromRGB(140, 80, 220)
+stroke.Thickness = 1.5
+
+local title = Instance.new("TextLabel", main)
+title.Size = UDim2.new(1, -20, 0, 30)
+title.Position = UDim2.new(0, 10, 0, 5)
+title.Text = "Yousef Hub 👑"
