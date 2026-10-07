@@ -35,14 +35,34 @@ local USE_TOUCH = false       -- خلها true إذا الضغط الفعلي م
 local ALWAYS_PHYSICAL = false -- true = يضغط ضغطة فعلية حتى لو لقى زر
 
 -- ====================================================================
--- 1. الواجهة
+-- 1. إنشاء الواجهة المضمونة (Fix GUI Parent)
 -- ====================================================================
+-- مسح أي واجهة قديمة موجودة
+for _, oldGui in ipairs({CoreGui, PlayerGui}) do
+    pcall(function()
+        local existing = oldGui:FindFirstChild("YousefHub_ExpertHack")
+        if existing then existing:Destroy() end
+    end)
+end
+
 local sg = Instance.new("ScreenGui")
 sg.Name = "YousefHub_ExpertHack"
 sg.ResetOnSpawn = false
 
-pcall(function() sg.Parent = game:GetService("CoreGui") end)
-if not sg.Parent or not sg:IsDescendantOf(game) then sg.Parent = PlayerGui end
+-- المحاولة المضمونة لإضافة الواجهة
+local parentSuccess = pcall(function()
+    if gethui then
+        sg.Parent = gethui()
+    elseif game:GetService("CoreGui") and pcall(function() sg.Parent = game:GetService("CoreGui") end) then
+        -- Parented to CoreGui
+    else
+        sg.Parent = PlayerGui
+    end
+end)
+
+if not sg.Parent or not sg:IsDescendantOf(game) then
+    sg.Parent = PlayerGui
+end
 
 local main = Instance.new("Frame", sg)
 main.Size = UDim2.new(0, 230, 0, 212)
@@ -98,7 +118,7 @@ Instance.new("UICorner", dumpBtn).CornerRadius = UDim.new(0, 6)
 
 local isRunning = false
 local startTime = 0
-local MAX_DURATION = 3600 -- 3600 ثانية = ساعة واحدة
+local MAX_DURATION = 3600 -- ساعة واحدة
 
 farmToggle.MouseButton1Click:Connect(function()
     isRunning = not isRunning
@@ -181,52 +201,4 @@ local function hudProtected(obj)
                 if hasText(c) then str = str .. " " .. c.Text:lower() end
             end
             for _, w in ipairs(HUD_WORDS) do
-                if str:find(w, 1, true) then return true end
-            end
-        end
-    end
-    return false
-end
-
-local function pressButton(btn)
-    if hudProtected(btn) then
-        logClick("BLOCKED-HUD(signal)", btn)
-        return
-    end
-    logClick("signal", btn)
-    pcall(function() firesignal(btn.Activated) end)
-    pcall(function() firesignal(btn.MouseButton1Click) end)
-end
-
-local function physicalClick(point, screenGui, expectObj)
-    pcall(function()
-        local top = nil
-        for _, o in ipairs(PlayerGui:GetGuiObjectsAtPosition(point.X, point.Y)) do
-            if not isOurs(o) then
-                top = o
-                break
-            end
-        end
-        if top and hudProtected(top) then
-            logClick("BLOCKED-HUD(physical)", top, point.X, point.Y)
-            return
-        end
-        if top and expectObj and getScreenGui(top) ~= getScreenGui(expectObj) then
-            logClick("BLOCKED-covered(physical)", top, point.X, point.Y)
-            return
-        end
-
-        local inset = Vector2.new(0, 0)
-        if screenGui and not screenGui.IgnoreGuiInset then
-            inset = GuiService:GetGuiInset()
-        end
-        local x, y = point.X + inset.X, point.Y + inset.Y
-        logClick("physical", expectObj, x, y)
-        if USE_TOUCH then
-            VIM:SendTouchEvent(1, 0, x, y)
-            task.wait(0.05)
-            VIM:SendTouchEvent(1, 2, x, y)
-        else
-            VIM:SendMouseButtonEvent(x, y, 0, true, game, 0)
-            task.wait(0.05)
-            VIM:SendMouseButtonEvent(x, y, 0, false, game, 0)
+                if
