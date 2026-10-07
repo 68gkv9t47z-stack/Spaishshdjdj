@@ -1,5 +1,5 @@
 -- ====================================================================
--- Yousef Hub v3: اختيار خبير + قراءة الكود المطلوب ومطابقته (مؤقت ساعة)
+-- Yousef Hub v3: اختيار خبير + قراءة الكود المطلوب ومطابقته
 -- ====================================================================
 
 local Players = game:GetService("Players")
@@ -20,6 +20,7 @@ LocalPlayer.Idled:Connect(function()
     end)
 end)
 
+-- احتياط: حركة ماوس صغيرة كل دقيقة (بعض المشغّلات ما يطلق Idled)
 task.spawn(function()
     while true do
         task.wait(60)
@@ -35,34 +36,14 @@ local USE_TOUCH = false       -- خلها true إذا الضغط الفعلي م
 local ALWAYS_PHYSICAL = false -- true = يضغط ضغطة فعلية حتى لو لقى زر
 
 -- ====================================================================
--- 1. إنشاء الواجهة المضمونة (Fix GUI Parent)
+-- 1. الواجهة
 -- ====================================================================
--- مسح أي واجهة قديمة موجودة
-for _, oldGui in ipairs({CoreGui, PlayerGui}) do
-    pcall(function()
-        local existing = oldGui:FindFirstChild("YousefHub_ExpertHack")
-        if existing then existing:Destroy() end
-    end)
-end
-
 local sg = Instance.new("ScreenGui")
 sg.Name = "YousefHub_ExpertHack"
 sg.ResetOnSpawn = false
 
--- المحاولة المضمونة لإضافة الواجهة
-local parentSuccess = pcall(function()
-    if gethui then
-        sg.Parent = gethui()
-    elseif game:GetService("CoreGui") and pcall(function() sg.Parent = game:GetService("CoreGui") end) then
-        -- Parented to CoreGui
-    else
-        sg.Parent = PlayerGui
-    end
-end)
-
-if not sg.Parent or not sg:IsDescendantOf(game) then
-    sg.Parent = PlayerGui
-end
+pcall(function() sg.Parent = game:GetService("CoreGui") end)
+if not sg.Parent or not sg:IsDescendantOf(game) then sg.Parent = PlayerGui end
 
 local main = Instance.new("Frame", sg)
 main.Size = UDim2.new(0, 230, 0, 212)
@@ -117,13 +98,10 @@ dumpBtn.TextSize = 11
 Instance.new("UICorner", dumpBtn).CornerRadius = UDim.new(0, 6)
 
 local isRunning = false
-local startTime = 0
-local MAX_DURATION = 3600 -- ساعة واحدة
 
 farmToggle.MouseButton1Click:Connect(function()
     isRunning = not isRunning
     if isRunning then
-        startTime = tick()
         farmToggle.Text = "تشغيل الدورة التلقائية: شغال 🟢"
         farmToggle.TextColor3 = Color3.fromRGB(46, 204, 113)
     else
@@ -188,6 +166,7 @@ local function logClick(kind, obj, x, y)
     end)
 end
 
+-- أزرار الشاشة الرئيسية اللي ما نبي نضغطها أبداً (سيارتك / المتجر / الهاتف ...)
 local HUD_WORDS = { "سيارتك", "سيارات", "المتجر", "متجر", "الهاتف", "تذكرة", "season", "shop", "store", "phone" }
 
 local function hudProtected(obj)
@@ -201,4 +180,882 @@ local function hudProtected(obj)
                 if hasText(c) then str = str .. " " .. c.Text:lower() end
             end
             for _, w in ipairs(HUD_WORDS) do
-                if
+                if str:find(w, 1, true) then return true end
+            end
+        end
+    end
+    return false
+end
+
+local function pressButton(btn)
+    if hudProtected(btn) then
+        logClick("BLOCKED-HUD(signal)", btn)
+        return
+    end
+    logClick("signal", btn)
+    pcall(function() firesignal(btn.Activated) end)
+    pcall(function() firesignal(btn.MouseButton1Click) end)
+end
+
+-- ضغطة فعلية: تتأكد أول إيش فوق المكان، وترفض إذا كان زر من الشاشة الرئيسية
+local function physicalClick(point, screenGui, expectObj)
+    pcall(function()
+        local top = nil
+        for _, o in ipairs(PlayerGui:GetGuiObjectsAtPosition(point.X, point.Y)) do
+            if not isOurs(o) then
+                top = o
+                break
+            end
+        end
+        if top and hudProtected(top) then
+            logClick("BLOCKED-HUD(physical)", top, point.X, point.Y)
+            return
+        end
+        if top and expectObj and getScreenGui(top) ~= getScreenGui(expectObj) then
+            logClick("BLOCKED-covered(physical)", top, point.X, point.Y)
+            return
+        end
+
+        local inset = Vector2.new(0, 0)
+        if screenGui and not screenGui.IgnoreGuiInset then
+            inset = GuiService:GetGuiInset()
+        end
+        local x, y = point.X + inset.X, point.Y + inset.Y
+        logClick("physical", expectObj, x, y)
+        if USE_TOUCH then
+            VIM:SendTouchEvent(1, 0, x, y)
+            task.wait(0.05)
+            VIM:SendTouchEvent(1, 2, x, y)
+        else
+            VIM:SendMouseButtonEvent(x, y, 0, true, game, 0)
+            task.wait(0.05)
+            VIM:SendMouseButtonEvent(x, y, 0, false, game, 0)
+        end
+    end)
+end
+
+-- ====================================================================
+-- شاشة اختيار الصعوبة
+-- ====================================================================
+local function findDifficultyScreen()
+    local screenGui, expertEl
+    for _, d in ipairs(PlayerGui:GetDescendants()) do
+        if hasText(d) and not isOurs(d) and isShown(d) then
+            local txt = d.Text
+            if txt:find("مستوى الصعوبة") then
+                screenGui = getScreenGui(d)
+            elseif txt:find("خبير") or txt:lower():find("expert") then
+                expertEl = d
+            end
+        end
+    end
+    if screenGui and expertEl then return screenGui, expertEl end
+    return nil, nil
+end
+
+local BAD_DIFF = { "سهل", "متمرس", "easy", "medium" }
+
+local function findButtonAt(screenGui, point)
+    local best, bestArea
+    for _, b in ipairs(screenGui:GetDescendants()) do
+        if isGuiButton(b) and isShown(b) and not isOurs(b) then
+            local p, s = b.AbsolutePosition, b.AbsoluteSize
+            if point.X >= p.X and point.X <= p.X + s.X and point.Y >= p.Y and point.Y <= p.Y + s.Y then
+                local low = fullText(b):lower()
+                local bad = false
+                for _, w in ipairs(BAD_DIFF) do
+                    if low:find(w) then bad = true break end
+                end
+                if not bad and not hudProtected(b) then
+                    local area = s.X * s.Y
+                    if not bestArea or area < bestArea then best, bestArea = b, area end
+                end
+            end
+        end
+    end
+    return best
+end
+
+-- محاولات متدرجة: إشارة الزر أولاً، والضغطة الفعلية آخر حل (وبحماية)
+-- إشارة وحدة فقط (مو الثنتين مع بعض، لأن اللعبة تقول "تمهّل" إذا انطلقت أحداث كثيرة)
+local function fireOne(btn, which)
+    if hudProtected(btn) then
+        logClick("BLOCKED-HUD(signal)", btn)
+        return
+    end
+    logClick("signal-" .. which, btn)
+    pcall(function() firesignal(btn[which]) end)
+end
+
+-- نفس ترتيب v4 اللي اشتغل: ضغطة فعلية وحدة أول، وبعدها إشارة وحدة بكل محاولة
+local function clickExpert(screenGui, expertEl, attempt)
+    local center = expertEl.AbsolutePosition + expertEl.AbsoluteSize / 2
+    local btn = findButtonAt(screenGui, center)
+    if attempt == 1 or attempt >= 4 or not btn then
+        physicalClick(center, screenGui, btn or expertEl)
+    elseif attempt == 2 then
+        fireOne(btn, "MouseButton1Click")
+    else
+        fireOne(btn, "Activated")
+    end
+end
+
+-- ====================================================================
+-- قراءة الأكواد: الشريط السفلي (المطلوب) + الأكواد الطايرة
+-- ====================================================================
+local function isCode(tok)
+    return #tok >= 3 and #tok <= 8
+        and tok:match("^[A-Za-z0-9]+$") ~= nil
+        and tok:match("%a") ~= nil
+end
+
+local function readCodes()
+    local perGui = {}
+    for _, d in ipairs(PlayerGui:GetDescendants()) do
+        if hasText(d) and not isOurs(d) and isShown(d) then
+            local txt = d.Text:gsub("<[^>]+>", ""):gsub("^%s+", ""):gsub("%s+$", "")
+            if txt ~= "" then
+                local tokens, words = {}, 0
+                for tok in txt:gmatch("%S+") do
+                    words = words + 1
+                    if isCode(tok) then table.insert(tokens, tok) end
+                end
+                if #tokens > 0 and #tokens == words then
+                    local gui = getScreenGui(d)
+                    if gui then
+                        perGui[gui] = perGui[gui] or {}
+                        table.insert(perGui[gui], {
+                            obj = d,
+                            tokens = tokens,
+                            cy = d.AbsolutePosition.Y + d.AbsoluteSize.Y / 2,
+                            ts = d.TextSize,
+                            tr = d.TextTransparency,
+                        })
+                    end
+                end
+            end
+        end
+    end
+
+    local bestGui, bestList
+    for g, list in pairs(perGui) do
+        if not bestList or #list > #bestList then bestGui, bestList = g, list end
+    end
+    if not bestList or #bestList < 2 then return nil end
+
+    local bar, floating = {}, {}
+    local hasMulti = false
+    for _, e in ipairs(bestList) do
+        if #e.tokens >= 2 then hasMulti = true end
+    end
+
+    if hasMulti then
+        for _, e in ipairs(bestList) do
+            if #e.tokens >= 2 then table.insert(bar, e) else table.insert(floating, e) end
+        end
+    else
+        -- الشريط = الصف الأدنى في الشاشة
+        local maxCY = -math.huge
+        for _, e in ipairs(bestList) do
+            if e.cy > maxCY then maxCY = e.cy end
+        end
+        for _, e in ipairs(bestList) do
+            if e.cy >= maxCY - 40 then table.insert(bar, e) else table.insert(floating, e) end
+        end
+    end
+    if #bar == 0 or #floating == 0 then return nil end
+
+    local barSet = {}
+    for _, e in ipairs(bar) do
+        for _, t in ipairs(e.tokens) do barSet[t] = true end
+    end
+
+    -- الكود المطلوب = الأكبر حجماً في الشريط، أو الأوضح (أقل شفافية)
+    local preferred
+    if #bar >= 2 and not hasMulti then
+        local maxTS, cnt, cand = -1, 0, nil
+        for _, e in ipairs(bar) do
+            if e.ts > maxTS then maxTS, cnt, cand = e.ts, 1, e
+            elseif e.ts == maxTS then cnt = cnt + 1 end
+        end
+        if cnt == 1 then
+            preferred = cand.tokens[1]
+        else
+            local minTr, cnt2, cand2 = 2, 0, nil
+            for _, e in ipairs(bar) do
+                if e.tr < minTr then minTr, cnt2, cand2 = e.tr, 1, e
+                elseif e.tr == minTr then cnt2 = cnt2 + 1 end
+            end
+            if cnt2 == 1 then preferred = cand2.tokens[1] end
+        end
+    end
+
+    return bestGui, barSet, preferred, floating
+end
+
+local lastClicked = setmetatable({}, { __mode = "k" })
+local lastAnyClick = 0
+
+local function clickCode(obj, gui)
+    local btn = nil
+    local cur = obj
+    for _ = 1, 4 do
+        if cur and isGuiButton(cur) then
+            btn = cur
+            break
+        end
+        cur = cur and cur.Parent
+    end
+    local since = tick() - lastAnyClick
+    if since < 0.35 then task.wait(0.35 - since) end
+    lastAnyClick = tick()
+
+    if btn then pressButton(btn) end
+    if (not btn) or ALWAYS_PHYSICAL then
+        physicalClick(obj.AbsolutePosition + obj.AbsoluteSize / 2, gui, obj)
+    end
+end
+
+local function solveCodes()
+    local gui, barSet, preferred, floating = readCodes()
+    if not gui then return false end
+
+    local targets = {}
+    if preferred then
+        for _, e in ipairs(floating) do
+            if e.tokens[1] == preferred then table.insert(targets, e) end
+        end
+        statusLabel.Text = "الحالة: 2️⃣ المطلوب: " .. preferred
+    else
+        for _, e in ipairs(floating) do
+            if barSet[e.tokens[1]] then table.insert(targets, e) end
+        end
+        statusLabel.Text = "الحالة: 2️⃣ حل الأكواد..."
+    end
+
+    for _, e in ipairs(targets) do
+        local last = lastClicked[e.obj]
+        if not last or tick() - last > 1 then
+            lastClicked[e.obj] = tick()
+            clickCode(e.obj, gui)
+            task.wait(0.12)
+        end
+    end
+    return true
+end
+
+local function hackUiOpen()
+    for _, d in ipairs(PlayerGui:GetDescendants()) do
+        if hasText(d) and not isOurs(d) then
+            local t = d.Text:gsub("%s+", "")
+            if (t == "X" or t == "x") and isShown(d) then return true end
+        end
+    end
+    return false
+end
+
+-- ====================================================================
+-- زر التشخيص: ينسخ هيكل الواجهات الظاهرة
+-- ====================================================================
+local function dumpTree()
+    local lines = { "== CLICK LOG (آخر الضغطات) ==" }
+    for _, l in ipairs(clickLog) do table.insert(lines, l) end
+    table.insert(lines, "== GUI ==")
+    for _, d in ipairs(PlayerGui:GetDescendants()) do
+        if d:IsA("GuiObject") and not isOurs(d) and isShown(d) then
+            local txt = hasText(d) and d.Text or ""
+            local extra = hasText(d) and (" TS=" .. d.TextSize .. " TT=" .. d.TextTransparency) or ""
+            table.insert(lines, string.format("%s | %s | \"%s\"%s | pos=(%d,%d) size=(%d,%d)",
+                d.ClassName, d:GetFullName():gsub("^Players%.[^%.]+%.PlayerGui%.", ""),
+                txt, extra,
+                d.AbsolutePosition.X, d.AbsolutePosition.Y, d.AbsoluteSize.X, d.AbsoluteSize.Y))
+            if #lines >= 700 then break end
+        end
+    end
+    local out = table.concat(lines, "\n")
+    local ok = pcall(function() setclipboard(out) end)
+    dumpBtn.Text = ok and "✅ اننسخ! الصقه في المحادثة" or "❌ setclipboard مو مدعوم"
+    if not ok then print(out) end
+    task.delay(3, function() dumpBtn.Text = "📋 نسخ هيكل الواجهة (للتشخيص)" end)
+end
+dumpBtn.MouseButton1Click:Connect(dumpTree)
+
+-- ====================================================================
+-- 2. تجهيز أو شراء أداة الاختراق
+-- ====================================================================
+local function equipOrBuyTool()
+    statusLabel.Text = "الحالة: 1️⃣ تجهيز أداة التهكير..."
+    local char = LocalPlayer.Character
+    local backpack = LocalPlayer:FindFirstChild("Backpack")
+
+    local toolFound = false
+    if backpack then
+        for _, item in pairs(backpack:GetChildren()) do
+            local n = item.Name:lower()
+            if n:find("hack") or n:find("أداة") or n:find("جهاز") or n:find("card") or n:find("قفض") then
+                item.Parent = char
+                toolFound = true
+                break
+            end
+        end
+    end
+
+    if not toolFound and char then
+        for _, item in pairs(char:GetChildren()) do
+            if item:IsA("Tool") then toolFound = true break end
+        end
+    end
+
+    if not toolFound then
+        for _, prompt in pairs(workspace:GetDescendants()) do
+            if prompt:IsA("ProximityPrompt") then
+                local act = prompt.ActionText:lower()
+                local obj = prompt.ObjectText:lower()
+                if act:find("شراء") or obj:find("متجر") or obj:find("أداة") or act:find("buy") then
+                    local part = prompt.Parent:IsA("BasePart") and prompt.Parent or prompt.Parent:FindFirstChildWhichIsA("BasePart")
+                    if part and char and char:FindFirstChild("HumanoidRootPart") then
+                        char.HumanoidRootPart.CFrame = part.CFrame * CFrame.new(0, 0, 2)
+                        task.wait(0.3)
+                        fireproximityprompt(prompt)
+                        task.wait(0.5)
+                        break
+                    end
+                end
+            end
+        end
+    end
+end
+
+-- ====================================================================
+-- 3. التهكير
+-- ====================================================================
+local atmBlacklist = setmetatable({}, { __mode = "k" })
+local atmCooldown = setmetatable({}, { __mode = "k" })      -- الصراف في فترة انتظار لين وقت معين
+local atmCooldownLevel = setmetatable({}, { __mode = "k" }) -- كم مرة تكررت (للمضاعفة)
+local COOLDOWN_CONFIRM = 8   -- كم ثانية نشوف "تمهّل" قبل ما نحكم إن الصراف مو جاهز
+
+local function atmPartOf(prompt)
+    local p = prompt.Parent
+    if not p then return nil end
+    if p:IsA("BasePart") then return p end
+    if p:IsA("Attachment") and p.Parent and p.Parent:IsA("BasePart") then return p.Parent end
+    return p:FindFirstChildWhichIsA("BasePart", true)
+end
+
+local LOCKED_WORDS = { "مقفل", "مغلق", "locked", "closed", "cooldown" }
+
+local function promptLooksLocked(prompt)
+    local s = (prompt.ActionText .. " " .. prompt.ObjectText):lower()
+    for _, w in ipairs(LOCKED_WORDS) do
+        if s:find(w, 1, true) then return true end
+    end
+    return false
+end
+
+-- كل الصرافات: اللي شكلها مفتوحة أولاً (الأقرب أولاً)، وبعدها الباقي كخيار احتياطي
+local function availableATMs(hrp)
+    local fresh, stale = {}, {}
+    local cooling = 0
+    for _, prompt in ipairs(workspace:GetDescendants()) do
+        if prompt:IsA("ProximityPrompt") then
+            local pName = prompt.Parent and prompt.Parent.Name:lower() or ""
+            local oText = prompt.ObjectText:lower()
+            local aText = prompt.ActionText:lower()
+            if pName:find("atm") or oText:find("صراف") or oText:find("atm") or aText:find("اختراق") then
+                local cd = atmCooldown[prompt]
+                local part = nil
+                if cd and tick() < cd then
+                    cooling = cooling + 1
+                else
+                    part = atmPartOf(prompt)
+                end
+                if part then
+                    local expires = atmBlacklist[prompt]
+                    local entry = {
+                        prompt = prompt,
+                        part = part,
+                        dist = (part.Position - hrp.Position).Magnitude,
+                        expires = expires or 0,
+                    }
+                    local looksOk = prompt.Enabled and not promptLooksLocked(prompt)
+                    local resting = expires and tick() < expires
+                    if looksOk and not resting then
+                        table.insert(fresh, entry)
+                    else
+                        table.insert(stale, entry)
+                    end
+                end
+            end
+        end
+    end
+    table.sort(fresh, function(a, b) return a.dist < b.dist end)
+    table.sort(stale, function(a, b)
+        if a.expires ~= b.expires then return a.expires < b.expires end
+        return a.dist < b.dist
+    end)
+    for _, e in ipairs(stale) do table.insert(fresh, e) end
+    return fresh, cooling
+end
+
+local atmDumped = false
+local function dumpAllPrompts(hrp)
+    local rows = {}
+    for _, prompt in ipairs(workspace:GetDescendants()) do
+        if prompt:IsA("ProximityPrompt") then
+            local part = atmPartOf(prompt)
+            local d = part and (part.Position - hrp.Position).Magnitude or 99999
+            table.insert(rows, {
+                d = d,
+                text = string.format("%s | Action=\"%s\" Object=\"%s\" Enabled=%s Dist=%d",
+                    prompt:GetFullName(), prompt.ActionText, prompt.ObjectText,
+                    tostring(prompt.Enabled), math.floor(d)),
+            })
+        end
+    end
+    table.sort(rows, function(a, b) return a.d < b.d end)
+    local lines = {}
+    for i = 1, math.min(#rows, 120) do table.insert(lines, rows[i].text) end
+    pcall(function() setclipboard(table.concat(lines, "\n")) end)
+end
+
+local function closeHackUi()
+    for _, d in ipairs(PlayerGui:GetDescendants()) do
+        if hasText(d) and not isOurs(d) and isShown(d) then
+            local t = d.Text:gsub("%s+", "")
+            if t == "X" or t == "x" then
+                clickCode(d, getScreenGui(d))
+                return
+            end
+        end
+    end
+end
+
+-- رسالة "تمهّل قليلاً" الظاهرة؟
+local function cooldownVisible()
+    for _, d in ipairs(PlayerGui:GetDescendants()) do
+        if hasText(d) and not isOurs(d) and isShown(d) and d.Text:find("تمه", 1, true) then
+            return true
+        end
+    end
+    return false
+end
+
+-- بعد ما تفتح شاشة الصعوبة: اختيار خبير ثم حل الأكواد
+-- ترجع: "played" | "cooldown" | false
+local function playHack()
+    local expertChosen = false
+    local t0, lastClick, attempt = tick(), 0, 0
+    while isRunning and tick() - t0 < 9 and not expertChosen do
+        local gui, expertEl = findDifficultyScreen()
+        if gui then
+            statusLabel.Text = "الحالة: 2️⃣ اختيار مستوى خبير ⭐⭐⭐ (محاولة " .. (attempt + 1) .. ")"
+            if tick() - lastClick > 1.5 then
+                attempt = attempt + 1
+                clickExpert(gui, expertEl, attempt)
+                lastClick = tick()
+            end
+            task.wait(0.4)
+            if not findDifficultyScreen() then expertChosen = true end
+        else
+            task.wait(0.1)
+        end
+    end
+    if not expertChosen then return false end
+
+    local t1, lastOpen = tick(), tick()
+    local waitingSince, cooldownSince = nil, nil
+    local sawCodes = false
+
+    while isRunning and tick() - t1 < 90 do
+        if findDifficultyScreen() then break end
+        local found = solveCodes()
+        if found then sawCodes = true end
+        if found or hackUiOpen() then lastOpen = tick() end
+        if tick() - lastOpen > 4 then break end
+
+        if found then
+            waitingSince, cooldownSince = nil, nil
+        else
+            waitingSince = waitingSince or tick()
+            local secs = math.floor(tick() - waitingSince)
+
+            if (not sawCodes) and cooldownVisible() then
+                -- "تمهّل قليلاً" ومافيه أكواد = الصراف مو جاهز
+                cooldownSince = cooldownSince or tick()
+                local c = math.floor(tick() - cooldownSince)
+                statusLabel.Text = "الحالة: ⏳ الصراف يقول تمهّل (" .. c .. "/" .. COOLDOWN_CONFIRM .. "ث)"
+                if tick() - cooldownSince >= COOLDOWN_CONFIRM then
+                    closeHackUi()
+                    task.wait(0.5)
+                    return "cooldown"
+                end
+            else
+                cooldownSince = nil
+                statusLabel.Text = "الحالة: بانتظار الأكواد (" .. secs .. "ث)"
+            end
+
+            if secs >= 30 then
+                closeHackUi()
+                break
+            end
+        end
+        task.wait(0.15)
+    end
+    return "played"
+end
+
+local function hackATM()
+    statusLabel.Text = "الحالة: 2️⃣ البحث عن صراف جاهز..."
+    local char = LocalPlayer.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return false end
+
+    local list, cooling = availableATMs(hrp)
+    local tries = 0
+
+    for _, atm in ipairs(list) do
+        if not isRunning or tries >= 5 then break end
+        tries = tries + 1
+        statusLabel.Text = "الحالة: 2️⃣ تجربة صراف رقم " .. tries .. "..."
+
+        hrp.CFrame = atm.part.CFrame * CFrame.new(0, 0, 2)
+        task.wait(0.5)
+        pcall(function() fireproximityprompt(atm.prompt) end)
+
+        -- إذا ما طلعت شاشة الصعوبة خلال 4 ثواني = الصراف مقفل
+        local opened = false
+        local t = tick()
+        while isRunning and tick() - t < 4 do
+            if findDifficultyScreen() then
+                opened = true
+                break
+            end
+            task.wait(0.1)
+        end
+
+        if opened then
+            local res = playHack()
+            if res == "cooldown" then
+                -- فترة انتظار: نضاعف المدة كل مرة (60 ← 120 ← 240 ... حد أقصى 600)
+                local lvl = atmCooldownLevel[atm.prompt] or 0
+                atmCooldownLevel[atm.prompt] = lvl + 1
+                atmCooldown[atm.prompt] = tick() + math.min(60 * (2 ^ lvl), 600)
+                statusLabel.Text = "الحالة: ⏳ الصراف مو جاهز، أجرب اللي بعده"
+            elseif res == "played" then
+                atmCooldownLevel[atm.prompt] = 0
+                atmBlacklist[atm.prompt] = tick() + 45
+                return true
+            else
+                atmBlacklist[atm.prompt] = tick() + 40
+            end
+        else
+            atmBlacklist[atm.prompt] = tick() + 40
+            statusLabel.Text = "الحالة: الصراف مقفل ⛔ أجرب اللي بعده"
+        end
+    end
+
+    if tries == 0 then
+        if cooling > 0 then
+            statusLabel.Text = "الحالة: كل الصرافات بفترة انتظار ⏳ أروح أغسل"
+        else
+            statusLabel.Text = "الحالة: ما لقيت أي صراف بالاسم"
+            if not atmDumped then
+                atmDumped = true
+                dumpAllPrompts(hrp)
+                statusLabel.Text = statusLabel.Text .. "\n📋 تم نسخ القائمة، الصقها في المحادثة"
+            end
+        end
+        task.wait(1)
+    end
+    return false
+end
+
+-- ====================================================================
+-- 4. غسيل الأموال
+-- ====================================================================
+local WASH_WORDS = { "غسيل", "غسل", "wash", "launder" }
+local CONFIRM_WORDS = { "تأكيد", "confirm", "موافق" }
+
+local function textHas(s, words)
+    s = tostring(s or ""):lower()
+    for _, w in ipairs(words) do
+        if s:find(w, 1, true) then return true end
+    end
+    return false
+end
+
+local function partOfPrompt(prompt)
+    local p = prompt.Parent
+    if not p then return nil end
+    if p:IsA("BasePart") then return p end
+    if p:IsA("Attachment") and p.Parent and p.Parent:IsA("BasePart") then return p.Parent end
+    return p:FindFirstChildWhichIsA("BasePart", true)
+end
+
+-- مكان شراء الأداة (نفس المكان اللي فيه الغسيل)
+local shopPart = nil
+local function findShop()
+    if shopPart and shopPart.Parent then return shopPart end
+    for _, prompt in ipairs(workspace:GetDescendants()) do
+        if prompt:IsA("ProximityPrompt") then
+            local act = prompt.ActionText:lower()
+            local obj = prompt.ObjectText:lower()
+            if act:find("شراء") or obj:find("متجر") or obj:find("أداة") or act:find("buy") then
+                local part = partOfPrompt(prompt)
+                if part then
+                    shopPart = part
+                    return part
+                end
+            end
+        end
+    end
+    return nil
+end
+
+local function nearbyPrompts(hrp, radius)
+    local list = {}
+    for _, prompt in ipairs(workspace:GetDescendants()) do
+        if prompt:IsA("ProximityPrompt") then
+            local part = partOfPrompt(prompt)
+            if part and (part.Position - hrp.Position).Magnitude <= radius then
+                table.insert(list, prompt)
+            end
+        end
+    end
+    return list
+end
+
+local function promptIsWash(prompt)
+    local p = prompt.Parent
+    return textHas(prompt.ActionText, WASH_WORDS)
+        or textHas(prompt.ObjectText, WASH_WORDS)
+        or textHas(prompt.Name, WASH_WORDS)
+        or (p ~= nil and textHas(p.Name, WASH_WORDS))
+end
+
+local function buttonOf(obj)
+    local cur = obj
+    for _ = 1, 4 do
+        if cur and isGuiButton(cur) then return cur end
+        cur = cur and cur.Parent
+    end
+    return nil
+end
+
+-- عناصر الغسيل/التأكيد الظاهرة (الأزرار أولاً، وإذا ما فيه أزرار نستخدم النصوص)
+local function washGuiTargets()
+    local washGuis = {}
+    for _, d in ipairs(PlayerGui:GetDescendants()) do
+        if hasText(d) and not isOurs(d) and isShown(d) and textHas(d.Text, WASH_WORDS) then
+            local g = getScreenGui(d)
+            if g then washGuis[g] = true end
+        end
+    end
+    local buttons, labels = {}, {}
+    for _, d in ipairs(PlayerGui:GetDescendants()) do
+        if hasText(d) and not isOurs(d) and isShown(d) then
+            local g = getScreenGui(d)
+            if g and washGuis[g] and (textHas(d.Text, WASH_WORDS) or textHas(d.Text, CONFIRM_WORDS)) then
+                if buttonOf(d) then table.insert(buttons, d) else table.insert(labels, d) end
+            end
+        end
+    end
+    if #buttons > 0 then return buttons end
+    return labels
+end
+
+local washDumped = false
+local function dumpWashDebug(hrp)
+    local lines = { "== PROMPTS near player ==" }
+    for _, prompt in ipairs(nearbyPrompts(hrp, 60)) do
+        local part = partOfPrompt(prompt)
+        table.insert(lines, string.format("%s | Action=\"%s\" Object=\"%s\" Enabled=%s Dist=%d MaxDist=%d",
+            prompt:GetFullName(), prompt.ActionText, prompt.ObjectText, tostring(prompt.Enabled),
+            math.floor((part.Position - hrp.Position).Magnitude), math.floor(prompt.MaxActivationDistance)))
+    end
+    table.insert(lines, "== VISIBLE TEXT ==")
+    for _, d in ipairs(PlayerGui:GetDescendants()) do
+        if hasText(d) and not isOurs(d) and isShown(d) and d.Text ~= "" then
+            table.insert(lines, string.format("%s | %s | \"%s\"", d.ClassName, d:GetFullName(), d.Text))
+            if #lines > 500 then break end
+        end
+    end
+    pcall(function() setclipboard(table.concat(lines, "\n")) end)
+end
+
+local function washMoney()
+    statusLabel.Text = "الحالة: 3️⃣ الذهاب لمكان الغسيل..."
+    local char = LocalPlayer.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
+
+    local shop = findShop()
+    if not shop then
+        statusLabel.Text = "الحالة: ما لقيت مكان شراء الأداة"
+        task.wait(2)
+        return
+    end
+
+    hrp.CFrame = shop.CFrame * CFrame.new(0, 0, 3)
+    task.wait(0.8)
+
+    local didSomething = false
+    local lastAct = tick()
+    local t0 = tick()
+
+    while isRunning and tick() - t0 < 12 do
+        local acted = false
+
+        -- 1) خيار غسيل على شكل ProximityPrompt
+        for _, prompt in ipairs(nearbyPrompts(hrp, 40)) do
+            if prompt.Enabled and promptIsWash(prompt) then
+                local last = lastClicked[prompt]
+                if not last or tick() - last > 2 then
+                    lastClicked[prompt] = tick()
+                    statusLabel.Text = "الحالة: 3️⃣ غسيل الأموال..."
+                    pcall(function() fireproximityprompt(prompt) end)
+                    acted = true
+                    task.wait(0.5)
+                end
+            end
+        end
+
+        -- 2) خيار غسيل/تأكيد على شكل واجهة
+        for _, d in ipairs(washGuiTargets()) do
+            local last = lastClicked[d]
+            if not last or tick() - last > 1.5 then
+                lastClicked[d] = tick()
+                statusLabel.Text = "الحالة: 3️⃣ غسيل الأموال (واجهة)..."
+                clickCode(d, getScreenGui(d))
+                acted = true
+                task.wait(0.3)
+            end
+        end
+
+        if acted then
+            didSomething = true
+            lastAct = tick()
+        end
+        if didSomething and tick() - lastAct > 2.5 then break end
+        if not didSomething and tick() - t0 > 5 then break end
+        task.wait(0.3)
+    end
+
+    if not didSomething then
+        statusLabel.Text = "الحالة: ما لقيت خيار الغسيل عند المتجر"
+        if not washDumped then
+            washDumped = true
+            dumpWashDebug(hrp)
+            statusLabel.Text = statusLabel.Text .. "\n📋 تم نسخ التفاصيل، الصقها في المحادثة"
+        end
+        task.wait(2)
+    else
+        statusLabel.Text = "الحالة: ✅ تم الغسيل، إعادة الدورة..."
+        task.wait(1)
+    end
+end
+
+-- ====================================================================
+-- 5. الدورة التلقائية
+-- ====================================================================
+-- حركة كل 5 دقايق: تمشي الشخصية شوي وتنقر ثم نكمل
+local AFK_INTERVAL = 300
+local lastAfk = tick()
+
+local function afkAction()
+    statusLabel.Text = "الحالة: 🚶 حركة مضادة للـ AFK..."
+    local char = LocalPlayer.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if not (hum and hrp) then return end
+
+    local origin = hrp.Position
+
+    -- نمشي لقدام شوي
+    local ahead = origin + hrp.CFrame.LookVector * 8
+    hum:MoveTo(ahead)
+    local t = tick()
+    while tick() - t < 2.5 and (hrp.Position - ahead).Magnitude > 2 do
+        task.wait(0.1)
+    end
+
+    -- ننقر في مكان فاضي من الواجهات (عشان ما نضغط أي زر)
+    pcall(function()
+        local vp = workspace.CurrentCamera.ViewportSize
+        local spot = nil
+        for _, fx in ipairs({ 0.5, 0.3, 0.7, 0.4, 0.6 }) do
+            for _, fy in ipairs({ 0.5, 0.4, 0.6, 0.35 }) do
+                local px, py = vp.X * fx, vp.Y * fy
+                if #PlayerGui:GetGuiObjectsAtPosition(px, py) == 0 then
+                    spot = Vector2.new(px, py)
+                    break
+                end
+            end
+            if spot then break end
+        end
+        if spot then
+            VirtualUser:CaptureController()
+            VirtualUser:ClickButton1(spot)
+            logClick("afk-click", nil, spot.X, spot.Y)
+        end
+    end)
+    task.wait(0.3)
+
+    -- نرجع لمكاننا
+    hum:MoveTo(origin)
+    t = tick()
+    while tick() - t < 2.5 and (hrp.Position - origin).Magnitude > 2 do
+        task.wait(0.1)
+    end
+end
+
+local function afkIfDue()
+    if tick() - lastAfk >= AFK_INTERVAL then
+        lastAfk = tick()
+        pcall(afkAction)
+    end
+end
+
+-- أقرب وقت (بالثواني) يخلص فيه انتظار صراف
+local function nextCooldownEta()
+    local best = nil
+    for _, t in pairs(atmCooldown) do
+        local left = t - tick()
+        if left > 0 and (not best or left < best) then best = left end
+    end
+    return best and math.ceil(best) or nil
+end
+
+task.spawn(function()
+    while true do
+        task.wait(0.5)
+        if isRunning then
+            pcall(function()
+                afkIfDue()
+                equipOrBuyTool()
+                task.wait(0.5)
+
+                local hacked = false
+                if isRunning then hacked = hackATM() end
+                task.wait(0.5)
+
+                afkIfDue()
+                if hacked then
+                    -- هكّرنا صراف → نروح نغسل
+                    if isRunning then washMoney() end
+                else
+                    -- ما انهكر أي صراف → ما نغسل، ننتظر لين تفتح وحدة
+                    local t = tick()
+                    while isRunning and tick() - t < 6 do
+                        local eta = nextCooldownEta()
+                        statusLabel.Text = "الحالة: ⏳ ما فيه صراف جاهز، أنتظر"
+                            .. (eta and ("\nأقرب صراف بعد ~" .. eta .. "ث") or "")
+                        afkIfDue()
+                        task.wait(1)
+                    end
+                end
+                task.wait(0.5)
+            end)
+        end
+    end
+end)
